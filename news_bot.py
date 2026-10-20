@@ -17,22 +17,19 @@ import feedparser
 import requests
 
 # (feed url, source name, emoji in front of the title[, keywords])
-# keywords (optional): post only items whose title or text contains one of them
 FEEDS = [
     ("https://cointelegraph.com/rss", "Cointelegraph", "⚡"),
-    ("http://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", "📊"),
-    ("https://techcrunch.com/feed/", "TechCrunch", "💻"),
     ("https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml", "CoinDesk", "🪙"),
     ("https://decrypt.co/feed", "Decrypt", "🔐"),
-    ("https://news.crunchbase.com/feed/", "Crunchbase News", "💰"),
-    ("https://feeds.npr.org/1014/rss.xml", "NPR Politics", "🇺🇸", ["Trump"]),
-    ("https://www.aljazeera.com/xml/rss/all.xml", "Al Jazeera", "🌍",
-     ["Iran", "Iranian", "Tehran", "Trump"]),
+    ("http://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", "📊"),
+    ("https://feeds.npr.org/1017/rss.xml", "NPR Economy", "🌍"),
 ]
 
 STATE_FILE = "sent.json"
-MAX_PER_FEED = 2       # at most this many new posts per feed per run
+MAX_PER_FEED = 1       # at most this many new posts per feed per run
+MAX_PER_RUN = 2        # at most this many posts in total per run
 ONLY_IMPORTANT = True  # post only big news (see IMPORTANT below)
+TRANSLATE_TO = "ru"    # post language ("ru" = Russian, "" = leave English)
 USE_WIKI_PHOTOS = True # try a photo of the person/company from the headline
 STATE_LIMIT = 1000     # how many sent links to remember
 SUMMARY_LIMIT = 120    # max length of the short description
@@ -137,14 +134,16 @@ def is_relevant(entry, keywords):
 
 # Big news: a headline/summary must match at least one of these to be posted
 IMPORTANT = re.compile(
-    r"\b(bitcoin|ethereum|etf|sec|fed|federal reserve|inflation|rate cut|rate hike|"
-    r"tariffs?|sanctions?|war|ceasefire|strike|attack|missile|nuclear|election|"
-    r"trump|iran|china|russia|ukraine|israel|biden|putin|musk|powell|"
-    r"hack(ed)?|exploit|bankruptcy|collapse|crash|record|all-time high|ban(s|ned)?|"
-    r"lawsuit|sues?|acquires?|acquisition|merger|ipo|layoffs?|"
-    r"openai|nvidia|apple|google|microsoft|meta|tesla|binance|coinbase|"
-    r"billion)\b"
-    r"|\$\s?\d+(\.\d+)?\s?(b|bn|billion)\b|\$\s?\d{3,}\s?(m|million)\b",
+    r"\b(etf|sec|cftc|fed|federal reserve|ecb|rate cuts?|rate hikes?|interest rates?|"
+    r"inflation|recession|gdp|unemployment|jobs report|cpi|tariffs?|sanctions?|"
+    r"default|bankruptcy|bankrupt|collapse|crash(es)?|plunges?|soars?|surges?|tumbles?|"
+    r"all-time high|record high|record low|"
+    r"hack(ed|s)?|exploit(ed)?|stolen|ban(s|ned)?|lawsuit|sues?|charged|arrested|"
+    r"approv(es|ed|al)|launch(es|ed)?|acquires?|acquisition|merger|ipo|"
+    r"stablecoin|halving|liquidations?|bailout|shutdown|"
+    r"billions?)\b"
+    r"|\$\s?\d+(\.\d+)?\s?(b|bn|billion)\b|\$\s?\d{3,}\s?(m|million)\b"
+    r"|\b\d{1,3}(\.\d+)?\s?%",
     re.I,
 )
 
@@ -161,7 +160,8 @@ WIKI_ALIASES = {
     "openai": "OpenAI", "nvidia": "Nvidia", "apple": "Apple Inc.",
     "google": "Google", "microsoft": "Microsoft", "meta": "Meta Platforms",
     "tesla": "Tesla, Inc.", "binance": "Binance", "coinbase": "Coinbase",
-    "anthropic": "Anthropic", "solana": "Solana (blockchain platform)",
+    "anthropic": "Anthropic", "telegram": "Telegram (software)", "durov": "Pavel Durov",
+    "toncoin": "Toncoin", "notcoin": "Notcoin", "solana": "Solana (blockchain platform)",
 }
 SKIP_WORDS = {"the", "a", "an", "why", "how", "what", "when", "who", "as", "in", "on",
               "at", "to", "for", "of", "new", "just", "report", "says", "after", "will"}
@@ -213,6 +213,28 @@ def wiki_photo(title):
     return None
 
 
+TAGS_RU = {"JUST IN": "СРОЧНО", "NEW": "НОВОЕ", "UPDATE": "ОБНОВЛЕНИЕ"}
+
+
+def translate(text):
+    """Free Google Translate endpoint; on any problem keep the original text."""
+    if not TRANSLATE_TO or not text:
+        return text
+    try:
+        r = requests.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": TRANSLATE_TO,
+                    "dt": "t", "q": text},
+            headers={"User-Agent": USER_AGENT}, timeout=15,
+        )
+        if not r.ok:
+            return text
+        out = "".join(part[0] for part in r.json()[0] if part and part[0])
+        return out.strip() or text
+    except Exception:
+        return text
+
+
 def pick_tag(title):
     t = title.lower()
     if re.search(r"\b(update|upgrade|rises?|falls?|drops?|surges?|jumps?)\b", t):
@@ -224,6 +246,12 @@ def pick_tag(title):
 
 def build_caption(emoji, source, title, summary, link):
     icon, tag = pick_tag(title)
+    if not SHOW_SUMMARY or summary.lower().startswith(title.lower()[:60]):
+        summary = ""  # description just repeats the title
+    if TRANSLATE_TO == "ru":
+        tag = TAGS_RU.get(tag, tag)
+    title = translate(title)
+    summary = translate(summary)
 
     def make(summ):
         parts = [f"{icon} <b>{tag}:</b> {html.escape(title, quote=False)}"]
@@ -238,8 +266,6 @@ def build_caption(emoji, source, title, summary, link):
             )
         return "\n\n".join(parts)
 
-    if not SHOW_SUMMARY or summary.lower().startswith(title.lower()[:60]):
-        summary = ""  # description just repeats the title
     caption = make(summary)
     if len(caption) > CAPTION_LIMIT:
         caption = make("")
@@ -277,6 +303,7 @@ def main():
     sent = state or []
     sent_set = set(sent)
     changed = False
+    posted = 0
 
     def remember(link):
         nonlocal changed
@@ -326,6 +353,8 @@ def main():
             remember(e["link"])
 
         for e in to_post:
+            if posted >= MAX_PER_RUN:
+                break  # enough for this run; the rest stays for the next one
             title = strip_html(e.get("title"))
             summary = clean_summary(e.get("summary") or e.get("description"))
             caption = build_caption(emoji, source, title, summary, clean_link(e["link"]))
@@ -334,6 +363,7 @@ def main():
                 or find_image(e) or fetch_og_image(e["link"])
             if send_post(token, channel, caption, image):
                 remember(e["link"])
+                posted += 1
             time.sleep(2)
 
     if changed or first_run:
