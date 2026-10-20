@@ -1,5 +1,5 @@
-"""Posts new items from RSS feeds to a Telegram channel as nice posts:
-picture + bold title + short description + source name.
+"""Posts new items from RSS feeds to a Telegram channel as short news posts:
+picture + bold label (JUST IN / NEW / UPDATE) + headline + one short sentence.
 
 Secrets come from environment variables:
   TG_TOKEN   - bot token from BotFather
@@ -16,24 +16,31 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import feedparser
 import requests
 
-# (feed url, source name, emoji in front of the title)
+# (feed url, source name, emoji in front of the title[, keywords])
+# keywords (optional): post only items whose title or text contains one of them
 FEEDS = [
     ("https://cointelegraph.com/rss", "Cointelegraph", "⚡"),
     ("http://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", "📊"),
     ("https://techcrunch.com/feed/", "TechCrunch", "💻"),
     ("https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml", "CoinDesk", "🪙"),
     ("https://decrypt.co/feed", "Decrypt", "🔐"),
+    ("https://news.crunchbase.com/feed/", "Crunchbase News", "💰"),
+    ("https://feeds.npr.org/1014/rss.xml", "NPR Politics", "🇺🇸", ["Trump"]),
+    ("https://www.aljazeera.com/xml/rss/all.xml", "Al Jazeera", "🌍",
+     ["Iran", "Iranian", "Tehran", "Trump"]),
 ]
 
 STATE_FILE = "sent.json"
 MAX_PER_FEED = 3       # at most this many new posts per feed per run
 STATE_LIMIT = 1000     # how many sent links to remember
-SUMMARY_LIMIT = 280    # max length of the short description
-SHOW_SOURCE = True     # short "Source: ..." line (no link) under each post
+SUMMARY_LIMIT = 120    # max length of the short description
+SHOW_SUMMARY = True    # one short sentence under the headline
+SHOW_SOURCE = False    # short "Source: ..." line (no link) under each post
 SHOW_LINK = False      # True = add a "Read more" link under each post
 CAPTION_LIMIT = 1000   # Telegram allows 1024 chars under a photo
 USER_AGENT = "Mozilla/5.0 (compatible; NewsBot/1.0)"
 API = "https://api.telegram.org/bot{}/{}"
+BAD_IMAGE = re.compile(r"pixel|tracking|spacer|logo|undefined|1x1|\.gif", re.I)
 
 
 def load_state():
@@ -94,15 +101,52 @@ def find_image(entry):
     blobs = [entry.get("summary") or ""]
     blobs += [c.get("value", "") for c in entry.get("content") or []]
     for blob in blobs:
-        m = re.search(r'<img[^>]+src=["\']([^"\']+)', blob)
-        if m:
-            return m.group(1)
+        for src in re.findall(r'<img[^>]+src=["\']([^"\']+)', blob):
+            if src.startswith("http") and not BAD_IMAGE.search(src):
+                return src
     return None
 
 
+def fetch_og_image(url):
+    """Last resort: take the main picture from the article page itself."""
+    try:
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=10)
+        if not r.ok:
+            return None
+        head = r.text[:200000]
+    except Exception:
+        return None
+    for pat in (
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+    ):
+        m = re.search(pat, head, re.I)
+        if m:
+            return html.unescape(m.group(1))
+    return None
+
+
+def is_relevant(entry, keywords):
+    text = strip_html(entry.get("title")) + " " + strip_html(
+        entry.get("summary") or entry.get("description")
+    )
+    return any(re.search(r"\b" + re.escape(k) + r"\b", text, re.I) for k in keywords)
+
+
+def pick_tag(title):
+    t = title.lower()
+    if re.search(r"\b(update|upgrade|rises?|falls?|drops?|surges?|jumps?)\b", t):
+        return "🔄", "UPDATE"
+    if re.search(r"\b(launch\w*|opens?|unveils?|announces?|introduces?|new|raises?)\b", t):
+        return "🆕", "NEW"
+    return "🚨", "JUST IN"
+
+
 def build_caption(emoji, source, title, summary, link):
+    icon, tag = pick_tag(title)
+
     def make(summ):
-        parts = [f"{emoji} <b>{html.escape(title, quote=False)}</b>"]
+        parts = [f"{icon} <b>{tag}:</b> {html.escape(title, quote=False)}"]
         if summ:
             parts.append(html.escape(summ, quote=False))
         if SHOW_SOURCE:
@@ -114,7 +158,7 @@ def build_caption(emoji, source, title, summary, link):
             )
         return "\n\n".join(parts)
 
-    if summary.lower().startswith(title.lower()[:60]):
+    if not SHOW_SUMMARY or summary.lower().startswith(title.lower()[:60]):
         summary = ""  # description just repeats the title
     caption = make(summary)
     if len(caption) > CAPTION_LIMIT:
@@ -161,7 +205,9 @@ def main():
             sent_set.add(link)
         changed = True
 
-    for url, source, emoji in FEEDS:
+    for feed_cfg in FEEDS:
+        url, source, emoji = feed_cfg[:3]
+        keywords = feed_cfg[3] if len(feed_cfg) > 3 else None
         feed = feedparser.parse(url, agent=USER_AGENT)
         if not feed.entries:
             print("No entries (or feed unreachable):", url, file=sys.stderr)
@@ -169,6 +215,15 @@ def main():
 
         # feeds list newest first
         new = [e for e in feed.entries if e.get("link") and e["link"] not in sent_set]
+
+        if keywords:
+            keep = []
+            for e in new:
+                if is_relevant(e, keywords):
+                    keep.append(e)
+                else:
+                    remember(e["link"])  # not on topic: never look at it again
+            new = keep
 
         if first_run:
             # first run: post only the latest item as a test,
@@ -186,7 +241,8 @@ def main():
             summary = clean_summary(e.get("summary") or e.get("description"))
             caption = build_caption(emoji, source, title, summary, clean_link(e["link"]))
             # only remember after a successful send, so nothing is lost on errors
-            if send_post(token, channel, caption, find_image(e)):
+            image = find_image(e) or fetch_og_image(e["link"])
+            if send_post(token, channel, caption, image):
                 remember(e["link"])
             time.sleep(2)
 
