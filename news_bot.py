@@ -29,7 +29,7 @@ STATE_FILE = "sent.json"
 MAX_PER_FEED = 1       # at most this many new posts per feed per run
 MAX_PER_RUN = 2        # at most this many posts in total per run
 ONLY_IMPORTANT = True  # post only big news (see IMPORTANT below)
-TRANSLATE_TO = "ru"    # post language ("ru" = Russian, "" = leave English)
+TRANSLATE_TO = ""      # post language ("ru" = Russian, "" = leave English)
 USE_WIKI_PHOTOS = True # try a photo of the person/company from the headline
 STATE_LIMIT = 1000     # how many sent links to remember
 SUMMARY_LIMIT = 120    # max length of the short description
