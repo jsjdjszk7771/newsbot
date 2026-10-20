@@ -1,5 +1,5 @@
-"""Posts new items from RSS feeds to a Telegram channel as short news posts:
-picture + bold label (JUST IN / NEW / UPDATE) + headline + one short sentence.
+"""Posts new items from RSS feeds to a Telegram channel as nice posts:
+picture + bold title + short description + clean source link.
 
 Secrets come from environment variables:
   TG_TOKEN   - bot token from BotFather
@@ -31,7 +31,9 @@ FEEDS = [
 ]
 
 STATE_FILE = "sent.json"
-MAX_PER_FEED = 3       # at most this many new posts per feed per run
+MAX_PER_FEED = 2       # at most this many new posts per feed per run
+ONLY_IMPORTANT = True  # post only big news (see IMPORTANT below)
+USE_WIKI_PHOTOS = True # try a photo of the person/company from the headline
 STATE_LIMIT = 1000     # how many sent links to remember
 SUMMARY_LIMIT = 120    # max length of the short description
 SHOW_SUMMARY = True    # one short sentence under the headline
@@ -133,6 +135,84 @@ def is_relevant(entry, keywords):
     return any(re.search(r"\b" + re.escape(k) + r"\b", text, re.I) for k in keywords)
 
 
+# Big news: a headline/summary must match at least one of these to be posted
+IMPORTANT = re.compile(
+    r"\b(bitcoin|ethereum|etf|sec|fed|federal reserve|inflation|rate cut|rate hike|"
+    r"tariffs?|sanctions?|war|ceasefire|strike|attack|missile|nuclear|election|"
+    r"trump|iran|china|russia|ukraine|israel|biden|putin|musk|powell|"
+    r"hack(ed)?|exploit|bankruptcy|collapse|crash|record|all-time high|ban(s|ned)?|"
+    r"lawsuit|sues?|acquires?|acquisition|merger|ipo|layoffs?|"
+    r"openai|nvidia|apple|google|microsoft|meta|tesla|binance|coinbase|"
+    r"billion)\b"
+    r"|\$\s?\d+(\.\d+)?\s?(b|bn|billion)\b|\$\s?\d{3,}\s?(m|million)\b",
+    re.I,
+)
+
+# short names -> Wikipedia article (people and organisations)
+WIKI_ALIASES = {
+    "trump": "Donald Trump", "biden": "Joe Biden", "putin": "Vladimir Putin",
+    "musk": "Elon Musk", "powell": "Jerome Powell", "zelensky": "Volodymyr Zelenskyy",
+    "xi": "Xi Jinping", "netanyahu": "Benjamin Netanyahu", "khamenei": "Ali Khamenei",
+    "altman": "Sam Altman", "zuckerberg": "Mark Zuckerberg", "bezos": "Jeff Bezos",
+    "nadella": "Satya Nadella", "huang": "Jensen Huang", "cook": "Tim Cook",
+    "saylor": "Michael J. Saylor", "buterin": "Vitalik Buterin", "cz": "Changpeng Zhao",
+    "fed": "Federal Reserve", "sec": "U.S. Securities and Exchange Commission",
+    "iran": "Iran", "bitcoin": "Bitcoin", "ethereum": "Ethereum",
+    "openai": "OpenAI", "nvidia": "Nvidia", "apple": "Apple Inc.",
+    "google": "Google", "microsoft": "Microsoft", "meta": "Meta Platforms",
+    "tesla": "Tesla, Inc.", "binance": "Binance", "coinbase": "Coinbase",
+    "anthropic": "Anthropic", "solana": "Solana (blockchain platform)",
+}
+SKIP_WORDS = {"the", "a", "an", "why", "how", "what", "when", "who", "as", "in", "on",
+              "at", "to", "for", "of", "new", "just", "report", "says", "after", "will"}
+
+
+def is_important(entry):
+    text = strip_html(entry.get("title")) + " " + strip_html(
+        entry.get("summary") or entry.get("description")
+    )
+    return bool(IMPORTANT.search(text))
+
+
+def wiki_photo(title):
+    """Find a photo of the person / company named in the headline (Wikipedia)."""
+    candidates = []
+    words = re.findall(r"[A-Za-z0-9.&'-]+", title)
+    for w in words:  # known short names first (Trump, Musk, Fed ...)
+        alias = WIKI_ALIASES.get(w.lower().strip(".'-"))
+        if alias and alias not in candidates:
+            candidates.append(alias)
+    for m in re.findall(r"\b[A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*)+", title):  # full names
+        if m.split()[0].lower() not in SKIP_WORDS and m not in candidates:
+            candidates.insert(0, m)
+    for w in re.findall(r"\b[A-Z][a-zA-Z0-9]{3,}\b", title)[1:]:  # single names (Bybit ...)
+        if w.lower() not in SKIP_WORDS and w not in candidates:
+            candidates.append(w)
+    for name in candidates[:5]:
+        try:
+            r = requests.get(
+                "https://en.wikipedia.org/api/rest_v1/page/summary/"
+                + requests.utils.quote(name.replace(" ", "_"), safe="(),._"),
+                headers={"User-Agent": USER_AGENT}, timeout=10,
+            )
+            if not r.ok:
+                continue
+            data = r.json()
+            if data.get("type") == "disambiguation":
+                continue
+            img = (data.get("originalimage") or data.get("thumbnail") or {}).get("source")
+            if not img:
+                continue
+            thumb = (data.get("thumbnail") or {}).get("source")
+            # a ~1000px version is plenty for Telegram and always small enough
+            if thumb:
+                img = re.sub(r"/\d+px-", "/1000px-", thumb)
+            return img
+        except Exception:
+            continue
+    return None
+
+
 def pick_tag(title):
     t = title.lower()
     if re.search(r"\b(update|upgrade|rises?|falls?|drops?|surges?|jumps?)\b", t):
@@ -225,6 +305,15 @@ def main():
                     remember(e["link"])  # not on topic: never look at it again
             new = keep
 
+        if ONLY_IMPORTANT:
+            keep = []
+            for e in new:
+                if is_important(e):
+                    keep.append(e)
+                else:
+                    remember(e["link"])  # not big news: skip for good
+            new = keep
+
         if first_run:
             # first run: post only the latest item as a test,
             # remember the rest so old news do not flood the channel
@@ -241,7 +330,8 @@ def main():
             summary = clean_summary(e.get("summary") or e.get("description"))
             caption = build_caption(emoji, source, title, summary, clean_link(e["link"]))
             # only remember after a successful send, so nothing is lost on errors
-            image = find_image(e) or fetch_og_image(e["link"])
+            image = (wiki_photo(title) if USE_WIKI_PHOTOS else None) \
+                or find_image(e) or fetch_og_image(e["link"])
             if send_post(token, channel, caption, image):
                 remember(e["link"])
             time.sleep(2)
