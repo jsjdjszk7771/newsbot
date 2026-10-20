@@ -21,6 +21,8 @@ FEEDS = [
     ("https://cointelegraph.com/rss", "Cointelegraph", "⚡"),
     ("http://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", "📊"),
     ("https://techcrunch.com/feed/", "TechCrunch", "💻"),
+    ("https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml", "CoinDesk", "🪙"),
+    ("https://decrypt.co/feed", "Decrypt", "🔐"),
 ]
 
 STATE_FILE = "sent.json"
