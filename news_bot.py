@@ -16,18 +16,37 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import feedparser
 import requests
 
+# Topics that move markets: oil, Hormuz, wars, sanctions, central banks, trade ...
+WORLD_KW = [
+    "Hormuz", "Strait", "OPEC", "oil", "crude", "Brent", "LNG", "tanker", "pipeline",
+    "blockade", "Iran", "Israel", "Saudi", "Russia", "Ukraine", "Taiwan", "North Korea",
+    "sanctions", "tariff", "tariffs", "trade war", "Federal Reserve", "Fed chair",
+    "Powell", "central bank", "ECB", "interest rate", "interest rates", "inflation",
+    "recession", "Wall Street", "stocks", "stock market", "dollar", "Treasury",
+    "bond yields", "gold", "default", "debt", "Bitcoin", "crypto", "cryptocurrency",
+    "nuclear", "ceasefire", "embargo",
+]
+OIL_KW = ["Hormuz", "OPEC", "Iran", "Saudi", "sanctions", "crude", "Brent", "tanker",
+          "pipeline", "LNG", "Russia", "oil price", "oil prices"]
+
 # (feed url, source name, emoji in front of the title[, keywords])
+# With keywords: post items that contain one of them.
+# Without keywords: post only if the news is "important" (see IMPORTANT below).
 FEEDS = [
     ("https://cointelegraph.com/rss", "Cointelegraph", "⚡"),
     ("https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml", "CoinDesk", "🪙"),
     ("https://decrypt.co/feed", "Decrypt", "🔐"),
     ("http://feeds.bbci.co.uk/news/business/rss.xml", "BBC Business", "📊"),
     ("https://feeds.npr.org/1017/rss.xml", "NPR Economy", "🌍"),
+    ("http://feeds.bbci.co.uk/news/world/rss.xml", "BBC World", "🌐", WORLD_KW),
+    ("https://feeds.npr.org/1004/rss.xml", "NPR World", "🌐", WORLD_KW),
+    ("https://www.aljazeera.com/xml/rss/all.xml", "Al Jazeera", "🌍", WORLD_KW),
+    ("https://oilprice.com/rss/main", "OilPrice", "🛢️", OIL_KW),
 ]
 
 STATE_FILE = "sent.json"
-MAX_PER_FEED = 1       # at most this many new posts per feed per run
-MAX_PER_RUN = 2        # at most this many posts in total per run
+MAX_PER_FEED = 2       # at most this many new posts per feed per run
+MAX_PER_RUN = 3        # at most this many posts in total per run
 ONLY_IMPORTANT = True  # post only big news (see IMPORTANT below)
 TRANSLATE_TO = ""      # post language ("ru" = Russian, "" = leave English)
 USE_WIKI_PHOTOS = True # try a photo of the person/company from the headline
@@ -161,6 +180,7 @@ WIKI_ALIASES = {
     "google": "Google", "microsoft": "Microsoft", "meta": "Meta Platforms",
     "tesla": "Tesla, Inc.", "binance": "Binance", "coinbase": "Coinbase",
     "anthropic": "Anthropic", "telegram": "Telegram (software)", "durov": "Pavel Durov",
+    "hormuz": "Strait of Hormuz", "opec": "OPEC", "saudi": "Saudi Arabia",
     "toncoin": "Toncoin", "notcoin": "Notcoin", "solana": "Solana (blockchain platform)",
 }
 SKIP_WORDS = {"the", "a", "an", "why", "how", "what", "when", "who", "as", "in", "on",
@@ -332,7 +352,7 @@ def main():
                     remember(e["link"])  # not on topic: never look at it again
             new = keep
 
-        if ONLY_IMPORTANT:
+        if ONLY_IMPORTANT and not keywords:
             keep = []
             for e in new:
                 if is_important(e):
