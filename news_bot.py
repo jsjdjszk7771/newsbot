@@ -5,6 +5,7 @@ Secrets come from environment variables:
   TG_TOKEN   - bot token from BotFather
   TG_CHANNEL - channel username like @mychannel (or numeric id for private channels)
 """
+import calendar
 import html
 import json
 import os
@@ -47,6 +48,7 @@ FEEDS = [
 STATE_FILE = "sent.json"
 MAX_PER_FEED = 2       # at most this many new posts per feed per run
 MAX_PER_RUN = 3        # at most this many posts in total per run
+MAX_AGE_HOURS = 3      # skip news older than this (0 = no age limit)
 ONLY_IMPORTANT = True  # post only big news (see IMPORTANT below)
 TRANSLATE_TO = ""      # post language ("ru" = Russian, "" = leave English)
 USE_WIKI_PHOTOS = True # try a photo of the person/company from the headline
@@ -142,6 +144,17 @@ def fetch_og_image(url):
         if m:
             return html.unescape(m.group(1))
     return None
+
+
+def is_fresh(entry):
+    """True if the news came out within the last MAX_AGE_HOURS hours."""
+    if not MAX_AGE_HOURS:
+        return True
+    stamp = entry.get("published_parsed") or entry.get("updated_parsed")
+    if not stamp:
+        return True  # feed gives no date: cannot tell, let it through
+    age = time.time() - calendar.timegm(stamp)
+    return age <= MAX_AGE_HOURS * 3600
 
 
 def is_relevant(entry, keywords):
@@ -342,6 +355,14 @@ def main():
 
         # feeds list newest first
         new = [e for e in feed.entries if e.get("link") and e["link"] not in sent_set]
+
+        fresh = []
+        for e in new:
+            if is_fresh(e):
+                fresh.append(e)
+            else:
+                remember(e["link"])  # too old: never look at it again
+        new = fresh
 
         if keywords:
             keep = []
